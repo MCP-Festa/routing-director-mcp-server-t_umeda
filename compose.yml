@@ -1,0 +1,39 @@
+services:
+  mcp-server:
+    build: .
+    image: routing-director-mcp-server:2.8.0
+    container_name: routing-director-mcp
+    ports:
+      - "8012:8012"
+    environment:
+      # --- Routing Director connection ---
+      # Provide these via a .env file (see .env.example) or your shell environment.
+      - RD_HTTP_URL=${RD_HTTP_URL}
+      - RD_ORG_ID=${RD_ORG_ID}
+      # Auth: set RD_AUTH_TOKEN for token auth, OR RD_AUTH_USERNAME + RD_AUTH_PASSWORD
+      # for basic auth. RD_AUTH_TYPE is inferred from whichever you provide, but you
+      # can set it explicitly to "token" or "basic".
+      - RD_AUTH_TYPE=${RD_AUTH_TYPE:-}
+      - RD_AUTH_TOKEN=${RD_AUTH_TOKEN:-}
+      - RD_AUTH_USERNAME=${RD_AUTH_USERNAME:-}
+      - RD_AUTH_PASSWORD=${RD_AUTH_PASSWORD:-}
+      # --- Optional ---
+      - RD_COMPONENTS=${RD_COMPONENTS:-}                       # comma-separated, e.g. "ems,device-kpi"
+      - RD_OPENAPI_SPEC=${RD_OPENAPI_SPEC:-}
+      - RD_MLFLOW_TRACKING_URI=${RD_MLFLOW_TRACKING_URI:-}
+      - RD_MLFLOW_EXPERIMENT=${RD_MLFLOW_EXPERIMENT:-}
+      - RD_MLFLOW_ENABLED=${RD_MLFLOW_ENABLED:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-ERROR}                          # ERROR | WARNING | INFO | DEBUG
+
+    # Prefer env vars above. To use a config file instead, drop the RD_* env vars
+    # and mount your config.json read-only (it must exist before `up`):
+    # volumes:
+    #   - ./config.json:/app/config.json:ro
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',8012))==0 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -211,5 +211,8 @@ RoutingDirectorMCP.egg-info
 PKG-INFO
 MANIFEST.in
 config.json
+.tokens
+.env
+mlruns/
 .idea/
 .vscode/

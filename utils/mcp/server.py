@@ -2,6 +2,7 @@ import json
 import os
 import logging
 import pathlib
+import tempfile
 from typing import Optional
 from fastmcp import FastMCP
 
@@ -35,7 +36,7 @@ def validate_mcp_config_file(config):
         if auth_config.get('username', None) is None or auth_config.get('password', None) is None:
             raise ValueError("Routing Director's GUI's username and password must be provided for basic authentication in the MCP config file.")
     elif auth_type == 'token':
-        if auth_config['token'] is None:
+        if auth_config.get('token') is None:
             raise ValueError("Routing Director's API Token must be provided for token authentication in the MCP config file.")
     else:
         raise ValueError(f"Invalid auth type `{auth_type}` in the MCP config file. Supported types are `token` and `basic`.")
@@ -52,6 +53,112 @@ def load_config(config_path: str) -> dict:
     except Exception as e:
         raise RuntimeError(f"Failed to load config from {config_path}: {e}")
 
+
+# Environment variables that can supply or override config.json values. Each maps an
+# env var name to the nested path it sets in the config dict. This lets the server run
+# with no config file (e.g. in containers) — see README "Configuration via environment".
+_ENV_CONFIG_MAP = {
+    "RD_HTTP_URL": ("http_url",),
+    "RD_ORG_ID": ("org_id",),
+    "RD_OPENAPI_SPEC": ("openapi_spec",),
+    "RD_AUTH_TYPE": ("auth", "type"),
+    "RD_AUTH_USERNAME": ("auth", "username"),
+    "RD_AUTH_PASSWORD": ("auth", "password"),
+    "RD_AUTH_TOKEN": ("auth", "token"),
+    "RD_MLFLOW_TRACKING_URI": ("mlflow", "tracking_uri"),
+    "RD_MLFLOW_EXPERIMENT": ("mlflow", "experiment"),
+}
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge overlay into base, returning a new dict. Overlay wins."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _set_nested(config: dict, path: tuple, value) -> None:
+    cursor = config
+    for key in path[:-1]:
+        cursor = cursor.setdefault(key, {})
+    cursor[path[-1]] = value
+
+
+def config_from_env() -> dict:
+    """Build a (partial) config dict from RD_* environment variables.
+
+    Returns {} when no relevant variables are set. RD_CONFIG_JSON, if present, is
+    parsed as the base config; individual RD_* variables then override it. Empty
+    strings are treated as unset, so unset compose variables don't clobber values.
+    """
+    config: dict = {}
+
+    raw_json = os.getenv("RD_CONFIG_JSON")
+    if raw_json:
+        try:
+            config = json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"RD_CONFIG_JSON is not valid JSON: {e}")
+
+    for env_var, path in _ENV_CONFIG_MAP.items():
+        value = os.getenv(env_var)
+        if value not in (None, ""):
+            _set_nested(config, path, value)
+
+    components = os.getenv("RD_COMPONENTS")
+    if components not in (None, ""):
+        config["components"] = [c.strip() for c in components.split(",") if c.strip()]
+
+    enabled = os.getenv("RD_MLFLOW_ENABLED")
+    if enabled not in (None, ""):
+        _set_nested(config, ("mlflow", "enabled"), enabled.strip().lower() in ("1", "true", "yes", "on"))
+
+    # Infer auth type when only credentials (and not the type) were provided via env.
+    auth = config.get("auth")
+    if isinstance(auth, dict) and not auth.get("type"):
+        if auth.get("token"):
+            auth["type"] = "token"
+        elif auth.get("username") or auth.get("password"):
+            auth["type"] = "basic"
+
+    return config
+
+
+def resolve_config(config_path: str):
+    """Resolve the effective config from a file and/or RD_* environment variables.
+
+    Precedence (low -> high): config file, then environment variables. Either source
+    alone is sufficient. Returns (config, used_env); used_env tells the caller whether
+    env vars contributed, so it knows the merged config must be re-materialized for the
+    client layer (client_connection.py reads config from the MCP_CONFIG file path).
+    """
+    file_config = {}
+    if config_path and os.path.exists(config_path):
+        file_config = load_config(config_path)
+
+    env_config = config_from_env()
+    if not file_config and not env_config:
+        raise ValueError(
+            "No configuration found. Provide --config <file> or set RD_* environment "
+            "variables (e.g. RD_HTTP_URL, RD_ORG_ID, and RD_AUTH_TOKEN or "
+            "RD_AUTH_USERNAME/RD_AUTH_PASSWORD)."
+        )
+
+    return _deep_merge(file_config, env_config), bool(env_config)
+
+
+def _write_temp_config(config: dict) -> str:
+    """Write the merged config to a temp file so the client layer can read it."""
+    fd, path = tempfile.mkstemp(prefix="rd_mcp_config_", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f)
+    logger.info("Merged config written to %s for client use.", path)
+    return path
+
 def _load_mcp_plugins() -> None:
     # Import all MCP modules so they can register with FastMCP
     import utils.mcp.ems  # noqa: F401
@@ -67,15 +174,20 @@ def create_mcp_server(args):
     global mcp_config
     global mcp
 
-    if args.config is None:
-        raise ValueError("Routing Directory MCP Server config file is required")
-
-    mcp_config = args.config
-    config = load_config(mcp_config)
+    # Config may come from a file (--config), RD_* environment variables, or both
+    # (env overrides the file). This allows running without a config file in containers.
+    config, used_env = resolve_config(args.config)
     validate_mcp_config_file(config)
 
-    # Setting necessary environment variables for the MCP server based on the config file.
-    os.environ['EOP_HOST'] = config.get('http_url')
+    # Setting necessary environment variables for the MCP server based on the config.
+    os.environ['EOP_HOST'] = config['http_url']
+    # The client layer (client_connection.py) reads the config from the MCP_CONFIG file
+    # path. When env vars contributed (or no readable file was given), materialize the
+    # merged config to a temp file so the client sees the same effective config.
+    if used_env or not (args.config and os.path.exists(args.config)):
+        mcp_config = _write_temp_config(config)
+    else:
+        mcp_config = args.config
     os.environ['MCP_CONFIG'] = mcp_config
 
     token_manager = TokenManager()

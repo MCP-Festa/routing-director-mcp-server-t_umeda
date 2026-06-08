@@ -1,0 +1,28 @@
+# VCS / CI
+.git
+.gitignore
+
+# Python caches & build artifacts
+__pycache__/
+*.py[codz]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+.mcp_venv/
+
+# Local runtime files that must NOT be baked into the image.
+# These are provided at runtime via bind mounts instead.
+config.json
+.tokens
+.env
+mlruns/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
