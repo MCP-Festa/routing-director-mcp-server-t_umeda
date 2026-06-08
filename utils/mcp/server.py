@@ -7,6 +7,7 @@ from fastmcp import FastMCP
 
 from utils.mcp.auth_manager import TokenManager
 from utils.mcp.utils import update_openapi_specs_with_tags
+from utils.mcp.tracing import configure_mlflow, install_tool_tracing
 from utils.mcp.constants import SERVER_NAME, DEFAULT_OPEN_API_SPEC
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +20,7 @@ mcp_config: str = ""
 
 def validate_mcp_config_file(config):
     mandatory_keys_keys = ['http_url', 'org_id', 'auth']
-    optional_config_keys = ['openapi_spec', 'components']
+    optional_config_keys = ['openapi_spec', 'components', 'mlflow']
     for key in mandatory_keys_keys:
         if key not in config:
             raise ValueError(f"Mandatory key `{key}` is missing in the MCP config file")
@@ -125,6 +126,11 @@ def create_mcp_server(args):
     else:
         logger.info("OpenAPI spec not available. Starting MCP server without it, some of the functionality might be unavailable.")
         mcp = FastMCP(name=SERVER_NAME, log_level="DEBUG", auth=verifier)
+
+    # Configure MLflow tracing (opt-in via the `mlflow` config section) and wrap
+    # mcp.tool BEFORE loading the plugins, so every tool they register is traced.
+    if configure_mlflow(config):
+        install_tool_tracing(mcp)
 
     _load_mcp_plugins()
     mcp.prompt(f"Organization ID or org id is {config.get('org_id')}")
