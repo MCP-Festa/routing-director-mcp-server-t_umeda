@@ -44,15 +44,23 @@ def configure_mlflow(config: dict) -> bool:
         )
         return False
 
-    _mlflow = mlflow
-
     tracking_uri = mlflow_config.get("tracking_uri")
-    if tracking_uri:
-        mlflow.set_tracking_uri(tracking_uri)
-        logger.info("MLflow tracking URI set to %s", tracking_uri)
-
     experiment = mlflow_config.get("experiment", SERVER_NAME)
-    mlflow.set_experiment(experiment)
+
+    # Tracing is an optional observability feature — a misconfigured backend must
+    # never crash the server. Note: with MLflow 3.x the local file store (the
+    # default when no tracking_uri is given) raises unless MLFLOW_ALLOW_FILE_STORE
+    # is set, so point tracking_uri at a tracking server or a DB (e.g. sqlite:///).
+    try:
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+            logger.info("MLflow tracking URI set to %s", tracking_uri)
+        mlflow.set_experiment(experiment)
+    except Exception as e:
+        logger.error("Failed to initialise MLflow tracing (%s). Tracing disabled; server continues.", e)
+        return False
+
+    _mlflow = mlflow
     logger.info("MLflow tracing enabled. Experiment: %s", experiment)
     return True
 
